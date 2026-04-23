@@ -137,3 +137,8 @@ documented in [`NOTICE`](NOTICE) and
 The original contributor list before this public release is preserved below:
 
 ![Original SQMesh contributors](docs/assets/original-contributors.png)
+
+## Honorable Mentions
+
+- [Ruihan Zhang](https://github.com/alderpaw) (`@alderpaw`)
+- [Wu Ping](https://github.com/pingwusu) (`@pingwusu`)
