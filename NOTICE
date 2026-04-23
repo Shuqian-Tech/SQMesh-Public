@@ -1,0 +1,82 @@
+SQMesh
+Copyright (c) 2026 Suzhou AI Lab & Shuqian Tech
+
+This product is licensed under the GNU Affero General Public License,
+version 3 or (at your option) any later version.  See LICENSE for the
+full license text.
+
+================================================================================
+Third-party software incorporated or referenced by SQMesh
+================================================================================
+
+The SQMesh source tree incorporates, derives from, or interoperates with the
+following third-party components.  A consolidated summary of each component's
+license is available in THIRD_PARTY_LICENSES.md.
+
+--------------------------------------------------------------------------------
+TetGen 1.6 (Hang Si, Weierstrass Institute for Applied Analysis and
+Stochastics, Berlin, Germany)
+--------------------------------------------------------------------------------
+
+The tetrahedral meshing core located under src/mesh/tet/core/ (all files in
+that directory except predicates.cxx) is a derivative work of TetGen 1.6.
+TetGen 1.6 is distributed under the GNU Affero General Public License v3.0.
+SQMesh therefore carries forward the AGPL-3.0 license terms for the project
+as a whole.
+
+Reference: https://wias-berlin.de/software/tetgen/
+
+--------------------------------------------------------------------------------
+Shewchuk's Robust Geometric Predicates (Jonathan Richard Shewchuk,
+Carnegie Mellon University)
+--------------------------------------------------------------------------------
+
+The file src/mesh/tet/core/predicates.cxx is Jonathan Richard Shewchuk's
+public-domain implementation of arbitrary-precision floating-point
+arithmetic and robust geometric predicates.  It is included verbatim and
+is not covered by the AGPL-3.0 license of the surrounding project.
+
+Reference: https://www.cs.cmu.edu/~quake/robust.html
+
+--------------------------------------------------------------------------------
+Gmsh 4.x (Christophe Geuzaine, Jean-Francois Remacle, and contributors)
+--------------------------------------------------------------------------------
+
+SQMesh does not incorporate Gmsh source code.  MSH file format
+interoperability in src/mesh/io/ is implemented independently against the
+publicly documented MSH 2/4 file format specification.  Gmsh itself is
+distributed under the GNU General Public License v2.0 or later, with
+exceptions (see the Gmsh upstream LICENSE for details).
+
+Reference: https://gmsh.info/
+
+--------------------------------------------------------------------------------
+OpenCASCADE Technology (Open CASCADE S.A.S.)
+--------------------------------------------------------------------------------
+
+SQMesh optionally links against OpenCASCADE Technology (OCCT) through the
+adapter in src/cad/occ/.  OCCT is distributed under the GNU Lesser General
+Public License v2.1 with an exception for certain deliveries.  Users who
+build SQMesh with OCCT support must comply with OCCT's license terms when
+redistributing the resulting binaries.
+
+Reference: https://www.opencascade.com/
+
+--------------------------------------------------------------------------------
+spdlog (Gabi Melman)
+--------------------------------------------------------------------------------
+
+SQMesh uses spdlog as its logging backend, distributed under the MIT
+license.  spdlog is consumed via its public headers only and is not
+modified by SQMesh.
+
+Reference: https://github.com/gabime/spdlog
+
+================================================================================
+Acknowledgements
+================================================================================
+
+The authors acknowledge Hang Si and the Weierstrass Institute for releasing
+TetGen under a free software license, and Jonathan Richard Shewchuk for
+placing his robust predicates in the public domain.  Their work makes an
+open tetrahedral mesher implementation practical.

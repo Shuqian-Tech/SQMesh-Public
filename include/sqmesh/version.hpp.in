@@ -1,0 +1,27 @@
+// Copyright (c) 2026 Suzhou AI Lab & Shuqian Tech.
+// Licensed under the GNU Affero General Public License v3.0 or later.
+// See LICENSE file in the project root for details.
+//
+#pragma once
+
+#define SQMESH_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define SQMESH_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define SQMESH_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define SQMESH_VERSION_STRING "@PROJECT_VERSION@"
+
+namespace sqmesh {
+
+struct Version final {
+  int major_v;
+  int minor_v;
+  int patch_v;
+};
+
+[[nodiscard]] constexpr Version version() noexcept
+{
+  return {SQMESH_VERSION_MAJOR, SQMESH_VERSION_MINOR, SQMESH_VERSION_PATCH};
+}
+
+[[nodiscard]] const char *version_string() noexcept;
+
+} // namespace sqmesh
