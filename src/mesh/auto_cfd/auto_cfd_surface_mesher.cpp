@@ -779,6 +779,23 @@ void log_open_mesh_edge_owner_breakdown(
     }
   );
 
+  std::string summary;
+  for(std::size_t i = 0U; i < ordered_buckets.size(); ++i) {
+    if(i > 0U) {
+      summary += ", ";
+    }
+    summary += topology_entity_debug_label(ordered_buckets[i].owner);
+    summary += "(x";
+    summary += std::to_string(ordered_buckets[i].count);
+    summary += " on ";
+    summary += topology_entity_debug_label(ordered_buckets[i].sample_face_owner);
+    summary += ")";
+  }
+  SQMESH_LOG_WARN(
+    "Open mesh-edge owner-breakdown: {} open edge(s) across {} owner(s) — {}",
+    total_open_edge_count,
+    ordered_buckets.size(),
+    summary);
 }
 
 void log_plan_open_edge_breakdown(
@@ -862,6 +879,24 @@ void log_plan_open_edge_breakdown(
     }
   );
 
+  std::string summary;
+  for(std::size_t i = 0U; i < buckets.size(); ++i) {
+    if(i > 0U) {
+      summary += ", ";
+    }
+    summary += buckets[i].constrained ? "constr/" : "interior/";
+    summary += topology_entity_debug_label(buckets[i].owner);
+    summary += "(x";
+    summary += std::to_string(buckets[i].count);
+    summary += ")";
+  }
+  SQMESH_LOG_WARN(
+    "Plan open edges on {} [{}]: {} open edge(s) across {} bucket(s) — {}",
+    topology_entity_debug_label(face_preprocess.face),
+    stage,
+    total_open_edge_count,
+    buckets.size(),
+    summary);
 }
 
 [[nodiscard]] MeshFaceKey canonical_face(
@@ -5713,7 +5748,6 @@ void find_cavity_aniso(
   }
 
   if(shell.size() != cavity.size() + 2U) {
-   
     restore_cavity();
     return false;
   }
@@ -5772,24 +5806,39 @@ void find_cavity_aniso(
       const double ex = p1[0] - p0[0], ey = p1[1] - p0[1], ez = p1[2] - p0[2];
       const double d3 = std::sqrt(ex*ex + ey*ey + ez*ez);
 
-      
+
+      // LL is the local target spacing used to gate the too-close
+      // rejection. Average ONLY v0 and v1 (the existing shell-edge
+      // endpoints), NOT new_vertex: new_vertex's sizes are inherited from
+      // its parent triangle and on planar interior faces (e.g. CRM symmetry
+      // plane) carry the size field's max_length value, which would inflate
+      // LL beyond every legitimate refinement near the boundary. The
+      // standard CDT-cavity practice is to use only the parent triangle's
+      // existing vertices to define the local spacing reference.
       const double lc =
-        (plan.vertices[edge.v0].local_size +
-         plan.vertices[edge.v1].local_size +
-         plan.vertices[new_vertex_index].local_size) / 3.0;
+        0.5 * (plan.vertices[edge.v0].local_size +
+               plan.vertices[edge.v1].local_size);
       const double lc_bgm =
-        (plan.vertices[edge.v0].background_size +
-         plan.vertices[edge.v1].background_size +
-         plan.vertices[new_vertex_index].background_size) / 3.0;
+        0.5 * (plan.vertices[edge.v0].background_size +
+               plan.vertices[edge.v1].background_size);
       const double LL = std::max(
         std::min(lc, lc_bgm),
         kMetricTolerance
       );
 
-      
+
+      // Perpendicular-distance (height) check from new point to the shell
+      // edge. Apply ONLY to genuine 1D boundary segments — short edges
+      // between two boundary vertices, gated on d3 < 1.5 * LL. The initial
+      // CDT also produces long boundary-to-boundary "chords" that span
+      // across the face interior; those endpoints are marked boundary but
+      // the edge itself is not a real 1D segment. Including chords in the
+      // d4 check rejects perfectly valid refinements that happen to land
+      // near a long chord (most of face:33's frontal-insertion failures
+      // on CRM at min_length=10).
       double d4 = 1.0e22;
-      if(plan.vertices[edge.v0].boundary && plan.vertices[edge.v1].boundary) {
-        // cross product of edge vector and v0-to-new vector
+      if(plan.vertices[edge.v0].boundary && plan.vertices[edge.v1].boundary &&
+         d3 < 1.5 * LL) {
         const double cx = ey * dz0 - ez * dy0;
         const double cy = ez * dx0 - ex * dz0;
         const double cz = ex * dy0 - ey * dx0;
@@ -9060,22 +9109,23 @@ void collect_unrecovered_boundary_retry_requests(
 {
   std::vector<LocalTriangle> accepted_triangles;
   accepted_triangles.reserve(plan.triangles.size());
-  std::size_t processed_triangle_count = 0U;
   for(const auto &triangle : plan.triangles) {
     if(!triangle.valid || !triangle.accepted) {
       continue;
     }
-    ++processed_triangle_count;
 
     LocalTriangle screened_triangle = triangle;
     if(should_flip_triangle_winding(face_view, plan, screened_triangle.vertices)) {
       std::swap(screened_triangle.vertices[1], screened_triangle.vertices[2]);
     }
-    if(std::abs(signed_triangle_area_twice(
-         plan.vertices[screened_triangle.vertices[0]].uv,
-         plan.vertices[screened_triangle.vertices[1]].uv,
-         plan.vertices[screened_triangle.vertices[2]].uv
-       )) <= kUvAreaTolerance) {
+    // Drop only structurally degenerate triangles (duplicate vertex
+    // indices). We deliberately do NOT use UV area here: on faces with a
+    // seam or polar singularity 3D-distinct vertices can collapse to the
+    // same UV point, and the previous UV-area tolerance was removing valid
+    // 3D triangles and leaving the delivered mesh non-conforming with the
+    // adjacent face's mesh.
+    const auto &v = screened_triangle.vertices;
+    if(v[0] == v[1] || v[1] == v[2] || v[0] == v[2]) {
       continue;
     }
     accepted_triangles.push_back(screened_triangle);
@@ -10147,6 +10197,23 @@ void inspect_auto_cfd_surface_quality_gate_impl(
   std::unordered_map<MeshEdgeKey, std::size_t, MeshEdgeKeyHash> edge_face_counts;
   std::unordered_set<MeshFaceKey, MeshFaceKeyHash> unique_faces;
 
+  // Per-OCC-face accumulator for delivered-quality-gate rejections, so we can
+  // pinpoint which input faces produced sliver triangles (e.g. CRM at
+  // min_length=10 leaves a handful of degenerate triangles on a couple of
+  // faces, and the global rejection counter alone hides which ones).
+  struct SliverBucket final {
+    geo::TopologyEntityId owner {};
+    std::size_t count = 0U;
+    double worst_min_angle = std::numeric_limits<double>::infinity();
+    double worst_max_angle = -std::numeric_limits<double>::infinity();
+    double worst_aspect_ratio = -std::numeric_limits<double>::infinity();
+    double worst_radius_ratio = std::numeric_limits<double>::infinity();
+    double worst_skewness = -std::numeric_limits<double>::infinity();
+  };
+  std::unordered_map<std::uint64_t, SliverBucket> sliver_buckets;
+  constexpr std::uint64_t kInvalidSliverOwnerKey =
+    std::numeric_limits<std::uint64_t>::max();
+
   for(const auto &entity_group : domain.entity_groups()) {
     if(entity_group.order() != EntityOrder::face ||
        entity_group.role() != EntityGroupRole::computational) {
@@ -10222,6 +10289,37 @@ void inspect_auto_cfd_surface_quality_gate_impl(
           diagnostics,
           testing::AutoCfdSurfaceFinalScreenFailureKind::quality_gate_rejection
         );
+
+        const auto owner = domain.face_topology_owner(face_ref);
+        const auto bucket_key = geo::is_valid(owner)
+          ? pack_topology_entity_id(owner)
+          : kInvalidSliverOwnerKey;
+        auto [it, inserted] =
+          sliver_buckets.emplace(bucket_key, SliverBucket {});
+        if(inserted) {
+          it->second.owner = owner;
+        }
+        ++it->second.count;
+        if(std::isfinite(quality.min_angle)) {
+          it->second.worst_min_angle =
+            std::min(it->second.worst_min_angle, quality.min_angle);
+        }
+        if(std::isfinite(quality.max_angle)) {
+          it->second.worst_max_angle =
+            std::max(it->second.worst_max_angle, quality.max_angle);
+        }
+        if(std::isfinite(quality.aspect_ratio)) {
+          it->second.worst_aspect_ratio =
+            std::max(it->second.worst_aspect_ratio, quality.aspect_ratio);
+        }
+        if(std::isfinite(quality.radius_ratio)) {
+          it->second.worst_radius_ratio =
+            std::min(it->second.worst_radius_ratio, quality.radius_ratio);
+        }
+        if(std::isfinite(quality.skewness)) {
+          it->second.worst_skewness =
+            std::max(it->second.worst_skewness, quality.skewness);
+        }
       }
     }
   }
@@ -10231,6 +10329,44 @@ void inspect_auto_cfd_surface_quality_gate_impl(
       diagnostics,
       testing::AutoCfdSurfaceFinalScreenFailureKind::no_surface_triangles
     );
+  }
+
+  if(!sliver_buckets.empty()) {
+    std::vector<SliverBucket> ordered;
+    ordered.reserve(sliver_buckets.size());
+    for(const auto &kv : sliver_buckets) {
+      ordered.push_back(kv.second);
+    }
+    std::sort(
+      ordered.begin(),
+      ordered.end(),
+      [](const SliverBucket &lhs, const SliverBucket &rhs) noexcept {
+        if(lhs.count != rhs.count) {
+          return lhs.count > rhs.count;
+        }
+        const auto lhs_key = geo::is_valid(lhs.owner)
+          ? pack_topology_entity_id(lhs.owner)
+          : kInvalidSliverOwnerKey;
+        const auto rhs_key = geo::is_valid(rhs.owner)
+          ? pack_topology_entity_id(rhs.owner)
+          : kInvalidSliverOwnerKey;
+        return lhs_key < rhs_key;
+      }
+    );
+
+    for(const auto &bucket : ordered) {
+      SQMESH_LOG_WARN(
+        "Quality-gate rejections on {}: {} triangle(s) — "
+        "worst min_angle={:.4f}°, max_angle={:.4f}°, "
+        "aspect={:.2f}, radius_ratio={:.4f}, skewness={:.4f}",
+        topology_entity_debug_label(bucket.owner),
+        bucket.count,
+        std::isfinite(bucket.worst_min_angle) ? bucket.worst_min_angle : 0.0,
+        std::isfinite(bucket.worst_max_angle) ? bucket.worst_max_angle : 0.0,
+        std::isfinite(bucket.worst_aspect_ratio) ? bucket.worst_aspect_ratio : 0.0,
+        std::isfinite(bucket.worst_radius_ratio) ? bucket.worst_radius_ratio : 0.0,
+        std::isfinite(bucket.worst_skewness) ? bucket.worst_skewness : 0.0);
+    }
   }
 }
 
