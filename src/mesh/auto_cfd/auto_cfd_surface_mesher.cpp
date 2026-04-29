@@ -8,6 +8,7 @@
 #include "auto_cfd_surface_test_hook.hpp"
 
 #include "core/log.hpp"
+#include "core/predicates.hpp"
 #include "core/runtime_registry.hpp"
 
 #include <algorithm>
@@ -688,6 +689,23 @@ void log_constrained_edge_owner_breakdown(
     }
   );
 
+  std::string summary;
+  for(std::size_t i = 0U; i < ordered_buckets.size(); ++i) {
+    if(i > 0U) {
+      summary += ", ";
+    }
+    summary += topology_entity_debug_label(ordered_buckets[i].owner);
+    summary += "(x";
+    summary += std::to_string(ordered_buckets[i].count);
+    summary += ")";
+  }
+  SQMESH_LOG_WARN(
+    "{} on {}: {} unrecovered constrained edge(s) across {} owner(s) — {}",
+    stage,
+    topology_entity_debug_label(face_preprocess.face),
+    edges.size(),
+    ordered_buckets.size(),
+    summary);
 }
 
 void log_open_mesh_edge_owner_breakdown(
@@ -2645,9 +2663,6 @@ void add_constrained_loop_edges(
       plan.vertices[triangle[1]].uv,
       plan.vertices[triangle[2]].uv
     );
-    if(std::abs(area) <= kUvAreaTolerance) {
-      continue;
-    }
     if(area < 0.0) {
       std::swap(triangle[1], triangle[2]);
     }
@@ -3318,6 +3333,14 @@ void divide_and_conquer_triangulate(
   std::vector<std::array<std::uint32_t, 3>> &out_triangles
 )
 {
+  // Initialise Shewchuk's adaptive predicates on first entry.
+  // Thread-safe per C++11 magic-statics; cheap on subsequent calls.
+  static const bool s_robust_predicates_ready = []{
+    ::exactinit(0, 0, 0, 1.0, 1.0, 1.0);
+    return true;
+  }();
+  (void)s_robust_predicates_ready;
+
   using PointNum = std::int32_t;
 
   const auto n = static_cast<PointNum>(points.size());
@@ -3377,20 +3400,14 @@ void divide_and_conquer_triangulate(
 
   
   const auto qtest = [&](PointNum h, PointNum i, PointNum j, PointNum k) -> bool {
-    const double ph[2] = {px(h), py(h)};
-    const double pi[2] = {px(i), py(i)};
-    const double pj[2] = {px(j), py(j)};
-    const double pk[2] = {px(k), py(k)};
+    // Non-const arrays: ::incircle() takes double* (Shewchuk's PD signature).
+    double ph[2] = {px(h), py(h)};
+    double pi[2] = {px(i), py(i)};
+    double pj[2] = {px(j), py(j)};
+    double pk[2] = {px(k), py(k)};
 
     const double orient = robust_pred::orient2d(ph, pi, pj);
-
-    const double adx = ph[0] - pk[0], ady = ph[1] - pk[1];
-    const double bdx = pi[0] - pk[0], bdy = pi[1] - pk[1];
-    const double cdx = pj[0] - pk[0], cdy = pj[1] - pk[1];
-    const double incircle =
-      adx * (bdy * (cdx*cdx + cdy*cdy) - cdy * (bdx*bdx + bdy*bdy))
-    - bdx * (ady * (cdx*cdx + cdy*cdy) - cdy * (adx*adx + ady*ady))
-    + cdx * (ady * (bdx*bdx + bdy*bdy) - bdy * (adx*adx + ady*ady));
+    const double incircle = ::incircle(ph, pi, pj, pk);
 
     return (incircle * orient < 0.0);
   };
@@ -4197,7 +4214,6 @@ void classify_interior_and_drop_exterior(
     return false;
   }
 
-  
   std::unordered_set<std::uint64_t> e2r_set;
   const auto total_constraint_count =
     outer_range.count + [&] {
@@ -4345,16 +4361,11 @@ void classify_interior_and_drop_exterior(
 
   plan.triangles.reserve(triangles.size());
   for(auto triangle : triangles) {
-    
     const double area = signed_triangle_area_twice(
       plan.vertices[triangle[0]].uv,
       plan.vertices[triangle[1]].uv,
       plan.vertices[triangle[2]].uv
     );
-    if(std::abs(area) <= kUvAreaTolerance) {
-      // Truly zero-area triangle — skip only these.
-      continue;
-    }
     if(area < 0.0) {
       std::swap(triangle[1], triangle[2]);
     }
@@ -4766,9 +4777,6 @@ void wire_periodic_counterparts_from_boundary_nodes(FaceMeshPlan &plan) noexcept
       plan.vertices[triangle[1]].uv,
       plan.vertices[triangle[2]].uv
     );
-    if(std::abs(area) <= kUvAreaTolerance) {
-      continue;
-    }
     if(area < 0.0) {
       std::swap(triangle[1], triangle[2]);
     }
@@ -4934,9 +4942,6 @@ void wire_periodic_counterparts_from_boundary_nodes(FaceMeshPlan &plan) noexcept
       plan.vertices[triangle[1]].uv,
       plan.vertices[triangle[2]].uv
     );
-    if(std::abs(area) <= kUvAreaTolerance) {
-      continue;
-    }
     if(area < 0.0) {
       std::swap(triangle[1], triangle[2]);
     }
@@ -8338,9 +8343,6 @@ void collect_missing_constrained_edges(
       plan.vertices[triangle[1]].uv,
       plan.vertices[triangle[2]].uv
     );
-    if(std::abs(area) <= kUvAreaTolerance) {
-      continue;
-    }
     if(area < 0.0) {
       std::swap(triangle[1], triangle[2]);
     }
@@ -8349,137 +8351,206 @@ void collect_missing_constrained_edges(
   return !plan.triangles.empty();
 }
 
+struct ConstrainedRecoverStats final {
+  std::size_t calls = 0U;
+  std::size_t target_invalid = 0U;
+  std::size_t target_already_present = 0U;
+  std::size_t empty_intersected = 0U;
+  std::size_t no_swap_choice_succeeded = 0U;
+  std::size_t swap_iter_limit_hit = 0U;
+  std::size_t intersected_total = 0U;
+  std::size_t constrained_blocking_total = 0U;
+  std::size_t reject_re_intersect = 0U;
+  std::size_t reject_neighbor_slot = 0U;
+  std::size_t reject_same_opposite = 0U;
+  std::size_t reject_new_diag_intersects = 0U;
+  std::size_t reject_non_convex = 0U;
+  std::size_t reject_orient = 0U;
+  std::size_t swapped = 0U;
+};
+
+static thread_local ConstrainedRecoverStats g_recover_stats {};
+
+// Recover one constrained edge by repeatedly swapping mesh edges that cross
+// the target segment in UV space. Standard CDT edge-recovery flip pass
+// (Lawson-style edge swaps applied along the missing constraint; see
+// Shewchuk, "Constrained Delaunay Triangulations and Robust Geometric
+// Predicates", and Chew 1989). Each outer iteration recollects the
+// intersected list (topology shifts after every swap), tries swap
+// candidates until one succeeds, and exits when the target edge is present
+// (intersected list empty) or no candidate can be swapped (fatal). The
+// previous version collected `intersected` once and returned after a
+// single swap, leaving outer callers to retry without state continuity —
+// that wasted swaps without ever recovering CRM's face:0.
 [[nodiscard]] bool try_recover_constrained_edge_by_swap(
   FaceMeshPlan &plan,
   LocalEdgeKey target_edge
 )
 {
+  ++g_recover_stats.calls;
   if(target_edge.first >= plan.vertices.size() ||
      target_edge.second >= plan.vertices.size()) {
+    ++g_recover_stats.target_invalid;
     return false;
+  }
+
+  if(edge_is_present_in_valid_mesh(plan, target_edge)) {
+    ++g_recover_stats.target_already_present;
+    return true;
   }
 
   const auto &target_a = plan.vertices[target_edge.first].uv;
   const auto &target_b = plan.vertices[target_edge.second].uv;
 
-  std::vector<std::array<std::uint32_t, 3>> neighbors;
-  build_triangle_neighbors(plan.triangles, neighbors);
+  constexpr std::size_t kMaxSwapIterations = 300U;
 
   struct IntersectingEdge {
     std::uint32_t triangle_index;
     std::uint8_t edge_slot;
   };
+
+  std::vector<std::array<std::uint32_t, 3>> neighbors;
   std::vector<IntersectingEdge> intersected;
-  std::size_t constrained_intersect_count = 0U;
 
-  for(std::uint32_t triangle_index = 0U;
-      triangle_index < plan.triangles.size();
-      ++triangle_index) {
-    const auto &triangle = plan.triangles[triangle_index];
-    if(!triangle.valid) continue;
+  for(std::size_t iter = 0U; iter < kMaxSwapIterations; ++iter) {
+    neighbors.clear();
+    build_triangle_neighbors(plan.triangles, neighbors);
 
-    for(std::uint8_t edge_slot = 0U; edge_slot < 3U; ++edge_slot) {
-      const auto neighbor_index = neighbors[triangle_index][edge_slot];
-      if(neighbor_index == invalid_index) continue;
-      if(!plan.triangles[neighbor_index].valid) continue;
+    intersected.clear();
+    std::size_t constrained_intersect_count = 0U;
 
-      const auto shared_a = triangle.vertices[edge_slot];
-      const auto shared_b = triangle.vertices[(edge_slot + 1U) % 3U];
+    for(std::uint32_t triangle_index = 0U;
+        triangle_index < plan.triangles.size();
+        ++triangle_index) {
+      const auto &triangle = plan.triangles[triangle_index];
+      if(!triangle.valid) continue;
 
-      // Deduplicate: only process each undirected edge once.
-      if(shared_a > shared_b) continue;
+      for(std::uint8_t edge_slot = 0U; edge_slot < 3U; ++edge_slot) {
+        const auto neighbor_index = neighbors[triangle_index][edge_slot];
+        if(neighbor_index == invalid_index) continue;
+        if(!plan.triangles[neighbor_index].valid) continue;
 
-      if(shared_a == target_edge.first || shared_a == target_edge.second ||
-         shared_b == target_edge.first || shared_b == target_edge.second) {
-        continue;
+        const auto shared_a = triangle.vertices[edge_slot];
+        const auto shared_b = triangle.vertices[(edge_slot + 1U) % 3U];
+
+        // Deduplicate: only process each undirected edge once.
+        if(shared_a > shared_b) continue;
+
+        if(shared_a == target_edge.first || shared_a == target_edge.second ||
+           shared_b == target_edge.first || shared_b == target_edge.second) {
+          continue;
+        }
+
+        if(!uv_segments_intersect(
+             plan.vertices[shared_a].uv, plan.vertices[shared_b].uv,
+             target_a, target_b)) {
+          continue;
+        }
+
+        const auto shared_edge = canonical_edge(shared_a, shared_b);
+        if(plan.constrained_edges.find(shared_edge) != plan.constrained_edges.end()) {
+          ++constrained_intersect_count;
+          continue;
+        }
+
+        intersected.push_back({triangle_index, edge_slot});
       }
+    }
 
-      // Check intersection.
+    g_recover_stats.constrained_blocking_total += constrained_intersect_count;
+    g_recover_stats.intersected_total += intersected.size();
+
+    if(intersected.empty()) {
+      // Either target is now in the mesh, or it shares a face with no
+      // crossing edge — verify and report accordingly.
+      if(edge_is_present_in_valid_mesh(plan, target_edge)) {
+        return true;
+      }
+      ++g_recover_stats.empty_intersected;
+      return false;
+    }
+
+    bool swapped = false;
+    for(const auto &ie : intersected) {
+      auto &triangle = plan.triangles[ie.triangle_index];
+      if(!triangle.valid) continue;
+
+      const auto neighbor_index = neighbors[ie.triangle_index][ie.edge_slot];
+      if(neighbor_index == invalid_index) continue;
+      auto &neighbor = plan.triangles[neighbor_index];
+      if(!neighbor.valid) continue;
+
+      const auto shared_a = triangle.vertices[ie.edge_slot];
+      const auto shared_b = triangle.vertices[(ie.edge_slot + 1U) % 3U];
+      const auto shared_edge = canonical_edge(shared_a, shared_b);
+
       if(!uv_segments_intersect(
            plan.vertices[shared_a].uv, plan.vertices[shared_b].uv,
            target_a, target_b)) {
+        ++g_recover_stats.reject_re_intersect;
         continue;
       }
 
-      const auto shared_edge = canonical_edge(shared_a, shared_b);
-      if(plan.constrained_edges.find(shared_edge) != plan.constrained_edges.end()) {
-        ++constrained_intersect_count;
+      const auto neighbor_edge_slot = find_triangle_edge_slot(neighbor, shared_edge);
+      if(neighbor_edge_slot >= 3U) {
+        ++g_recover_stats.reject_neighbor_slot;
         continue;
       }
 
-      intersected.push_back({triangle_index, edge_slot});
+      const auto opposite_c = triangle.vertices[(ie.edge_slot + 2U) % 3U];
+      const auto opposite_d = neighbor.vertices[(neighbor_edge_slot + 2U) % 3U];
+      if(opposite_c == opposite_d) {
+        ++g_recover_stats.reject_same_opposite;
+        continue;
+      }
+
+      const auto &opposite_c_uv = plan.vertices[opposite_c].uv;
+      const auto &opposite_d_uv = plan.vertices[opposite_d].uv;
+      const bool new_diag_touches_target =
+        opposite_c == target_edge.first || opposite_c == target_edge.second ||
+        opposite_d == target_edge.first || opposite_d == target_edge.second;
+      if(!new_diag_touches_target &&
+         uv_segments_intersect(opposite_c_uv, opposite_d_uv, target_a, target_b)) {
+        ++g_recover_stats.reject_new_diag_intersects;
+        continue;
+      }
+
+      const auto &p1_uv = plan.vertices[shared_a].uv;
+      const auto &p2_uv = plan.vertices[shared_b].uv;
+      const auto &op1_uv = plan.vertices[opposite_c].uv;
+      const auto &op2_uv = plan.vertices[opposite_d].uv;
+
+      const double ori_t1 = signed_triangle_area_twice(op1_uv, p1_uv, op2_uv);
+      const double ori_t2 = signed_triangle_area_twice(op1_uv, op2_uv, p2_uv);
+      if(ori_t1 * ori_t2 <= 0.0) {
+        ++g_recover_stats.reject_non_convex;
+        continue;
+      }
+
+      std::array<std::uint32_t, 3> first_triangle {shared_b, opposite_c, opposite_d};
+      std::array<std::uint32_t, 3> second_triangle {opposite_d, opposite_c, shared_a};
+      if(!orient_triangle_ccw(plan.vertices, first_triangle) ||
+         !orient_triangle_ccw(plan.vertices, second_triangle)) {
+        ++g_recover_stats.reject_orient;
+        continue;
+      }
+
+      triangle.vertices = first_triangle;
+      neighbor.vertices = second_triangle;
+      ++plan.instability.repair_flip_count;
+      ++g_recover_stats.swapped;
+      swapped = true;
+      break;
+    }
+
+    if(!swapped) {
+      ++g_recover_stats.no_swap_choice_succeeded;
+      return false;
     }
   }
 
-  for(const auto &ie : intersected) {
-    auto &triangle = plan.triangles[ie.triangle_index];
-    if(!triangle.valid) continue;
-
-    const auto neighbor_index = neighbors[ie.triangle_index][ie.edge_slot];
-    if(neighbor_index == invalid_index) continue;
-    auto &neighbor = plan.triangles[neighbor_index];
-    if(!neighbor.valid) continue;
-
-    const auto shared_a = triangle.vertices[ie.edge_slot];
-    const auto shared_b = triangle.vertices[(ie.edge_slot + 1U) % 3U];
-    const auto shared_edge = canonical_edge(shared_a, shared_b);
-
-    // Re-check intersection (topology may have shifted from a prior swap in same pass).
-    if(!uv_segments_intersect(
-         plan.vertices[shared_a].uv, plan.vertices[shared_b].uv,
-         target_a, target_b)) {
-      continue;
-    }
-
-    const auto neighbor_edge_slot = find_triangle_edge_slot(neighbor, shared_edge);
-    if(neighbor_edge_slot >= 3U) continue;
-
-    const auto opposite_c = triangle.vertices[(ie.edge_slot + 2U) % 3U];
-    const auto opposite_d = neighbor.vertices[(neighbor_edge_slot + 2U) % 3U];
-    if(opposite_c == opposite_d) continue;
-
-    const auto &opposite_c_uv = plan.vertices[opposite_c].uv;
-    const auto &opposite_d_uv = plan.vertices[opposite_d].uv;
-    const bool new_diag_touches_target =
-      opposite_c == target_edge.first || opposite_c == target_edge.second ||
-      opposite_d == target_edge.first || opposite_d == target_edge.second;
-    if(!new_diag_touches_target &&
-       uv_segments_intersect(opposite_c_uv, opposite_d_uv, target_a, target_b)) {
-      continue;
-    }
-
-    const auto &p1_uv = plan.vertices[shared_a].uv;
-    const auto &p2_uv = plan.vertices[shared_b].uv;
-    const auto &op1_uv = plan.vertices[opposite_c].uv;
-    const auto &op2_uv = plan.vertices[opposite_d].uv;
-
-    const double ori_t1 = signed_triangle_area_twice(op1_uv, p1_uv, op2_uv);
-    const double ori_t2 = signed_triangle_area_twice(op1_uv, op2_uv, p2_uv);
-    if(ori_t1 * ori_t2 <= 0.0) {
-      // Not strictly convex → swap would create invalid (overlapping) triangles.
-      continue;
-    }
-
-    // Build replacement triangles with consistent orientation.
-    std::array<std::uint32_t, 3> first_triangle {shared_b, opposite_c, opposite_d};
-    std::array<std::uint32_t, 3> second_triangle {opposite_d, opposite_c, shared_a};
-    if(!orient_triangle_ccw(plan.vertices, first_triangle) ||
-       !orient_triangle_ccw(plan.vertices, second_triangle)) {
-      continue;
-    }
-
-    triangle.vertices = first_triangle;
-    neighbor.vertices = second_triangle;
-    ++plan.instability.repair_flip_count;
-    return true;
-  }
-
-  // Diagnostic: if we get here, no swap was possible.
-  static thread_local std::size_t s_diag_count = 0U;
-  if(s_diag_count < 10U) {
-    ++s_diag_count;
-  }
-  return false;
+  ++g_recover_stats.swap_iter_limit_hit;
+  return edge_is_present_in_valid_mesh(plan, target_edge);
 }
 
 void recover_missing_constrained_edges(
@@ -8500,41 +8571,45 @@ void recover_missing_constrained_edges(
     "missing constrained-edge owner-breakdown"
   );
 
-  const std::size_t max_swaps_per_edge =
-    std::max<std::size_t>(8U, plan.triangles.size() * 2U);
+  g_recover_stats = {};
+
   std::size_t recovered_edge_count = 0U;
   std::size_t stalled_edge_count = 0U;
-  std::size_t attempted_swap_count = 0U;
   for(std::size_t edge_index = 0U; edge_index < missing_edges.size(); ++edge_index) {
     const auto edge = missing_edges[edge_index];
-    if(edge_is_present_in_valid_mesh(plan, edge)) {
-      ++recovered_edge_count;
-      continue;
-    }
-
-    for(std::size_t swap_count = 0U;
-        swap_count < max_swaps_per_edge &&
-        !edge_is_present_in_valid_mesh(plan, edge);
-        ++swap_count) {
-      ++attempted_swap_count;
-      if(!try_recover_constrained_edge_by_swap(plan, edge)) {
-        break;
-      }
-    }
-
-    const bool recovered = edge_is_present_in_valid_mesh(plan, edge);
-    if(recovered) {
+    if(try_recover_constrained_edge_by_swap(plan, edge)) {
       ++recovered_edge_count;
     }
     else {
       ++stalled_edge_count;
     }
-
-    if(edge_index < 4U || edge_index % 64U == 63U ||
-       edge_index + 1U == missing_edges.size()) {
-    }
   }
 
+  SQMESH_LOG_WARN(
+    "constrained-edge swap recovery on {}: missing_edges={}, recovered={}, "
+    "stalled={}, swap_calls={}, swapped={}, target_already_present={}, "
+    "empty_intersected={}, no_swap_choice={}, swap_iter_limit_hit={}, "
+    "intersected_total={}, constrained_blocking={}, reject_re_intersect={}, "
+    "reject_neighbor_slot={}, reject_same_opposite={}, "
+    "reject_new_diag_intersects={}, reject_non_convex={}, reject_orient={}",
+    topology_entity_debug_label(face_preprocess.face),
+    missing_edges.size(),
+    recovered_edge_count,
+    stalled_edge_count,
+    g_recover_stats.calls,
+    g_recover_stats.swapped,
+    g_recover_stats.target_already_present,
+    g_recover_stats.empty_intersected,
+    g_recover_stats.no_swap_choice_succeeded,
+    g_recover_stats.swap_iter_limit_hit,
+    g_recover_stats.intersected_total,
+    g_recover_stats.constrained_blocking_total,
+    g_recover_stats.reject_re_intersect,
+    g_recover_stats.reject_neighbor_slot,
+    g_recover_stats.reject_same_opposite,
+    g_recover_stats.reject_new_diag_intersects,
+    g_recover_stats.reject_non_convex,
+    g_recover_stats.reject_orient);
 }
 
 struct DelaunayRepairPassStats final {
@@ -8941,10 +9016,10 @@ void collect_unrecovered_boundary_retry_requests(
   std::vector<AutoCfdSurfaceBoundaryRetryRequest> *unrecovered_boundary_edges = nullptr
 )
 {
- 
+
   accept_all_valid_triangles(plan);
-  
-  run_delaunay_repair(face_view, field, face_preprocess, plan, false);
+
+  run_delaunay_repair(face_view, field, face_preprocess, plan, true);
 
   std::vector<LocalEdgeKey> missing_edges;
   collect_missing_constrained_edges(plan, missing_edges);
@@ -9346,6 +9421,25 @@ void run_laplacian_smoothing(
         &unrecovered_boundary_edges
       );
       if(status == base::StatusCode::ok) {
+        if(face_mesh.triangles.empty() ||
+           std::none_of(
+             face_mesh.triangles.begin(),
+             face_mesh.triangles.end(),
+             [](const LocalTriangle &triangle) {
+               return triangle.valid && triangle.accepted;
+             })) {
+          SQMESH_LOG_WARN(
+            "Auto CFD Surface Mesher produced an empty plan for {} "
+            "(seed_vertices={}, seed_triangles={}, total_triangles={}, "
+            "inserted_vertices={}, front_iterations={}). Face will have "
+            "no triangles in the final mesh.",
+            topology_entity_debug_label(face_view.entity),
+            face_mesh.seed_vertex_count,
+            face_mesh.seed_triangle_count,
+            face_mesh.triangles.size(),
+            face_mesh.inserted_vertex_count,
+            face_mesh.front_iteration_count);
+        }
         face_meshes.push_back(std::move(face_mesh));
         continue;
       }
@@ -9357,6 +9451,12 @@ void run_laplacian_smoothing(
       // on missile/torus geometries).
       if(status == base::StatusCode::unsupported &&
          unrecovered_boundary_edges.empty()) {
+        const auto reason = sqmesh::base::last_error_message();
+        SQMESH_LOG_WARN(
+          "Auto CFD Surface Mesher skipping {} (no triangles will be "
+          "produced for this face): {}",
+          topology_entity_debug_label(face_view.entity),
+          reason.empty() ? std::string("unsupported configuration") : reason);
         continue;
       }
 
@@ -9369,6 +9469,12 @@ void run_laplacian_smoothing(
       // boundary retry path below.
 
       if(retry >= kMaximumSharedBoundaryRecoveryRetries) {
+        const auto reason = sqmesh::base::last_error_message();
+        SQMESH_LOG_WARN(
+          "Auto CFD Surface Mesher exhausted shared-boundary retries on "
+          "{} (no triangles will be produced for this face): {}",
+          topology_entity_debug_label(face_view.entity),
+          reason.empty() ? std::string("unsupported configuration") : reason);
         continue;
       }
 
@@ -9569,6 +9675,9 @@ void populate_candidate_stats(
       );
     }
 
+    std::size_t emitted_triangle_count = 0U;
+    std::size_t collapsed_triangle_count = 0U;
+
     std::vector<EntityRef> local_node_refs(
       face_mesh.vertices.size(),
       EntityRef {}
@@ -9612,8 +9721,9 @@ void populate_candidate_stats(
         local_node_refs[triangle.vertices[2]],
       };
 
-      
+
       if(refs[0] == refs[1] || refs[0] == refs[2] || refs[1] == refs[2]) {
+        ++collapsed_triangle_count;
         continue;
       }
 
@@ -9625,6 +9735,7 @@ void populate_candidate_stats(
 
       const auto face_ref = output.add_triangle_face(geo_face_entity_groups[face_mesh.face.index], refs);
       output.set_face_topology_owner(face_ref, face_mesh.face);
+      ++emitted_triangle_count;
       const auto edge01_it = face_mesh.constrained_edge_owners.find(
         canonical_edge(oriented_triangle[0], oriented_triangle[1])
       );
@@ -9661,6 +9772,17 @@ void populate_candidate_stats(
           ? edge20_it->second
           : geo::TopologyEntityId {}
       );
+    }
+
+    if(emitted_triangle_count == 0U) {
+      SQMESH_LOG_WARN(
+        "inject_face_meshes emitted no triangles for {} (plan_triangles={}, "
+        "plan_vertices={}, collapsed_to_shared_node={}). Final mesh will "
+        "be missing this face.",
+        topology_entity_debug_label(face_mesh.face),
+        face_mesh.triangles.size(),
+        face_mesh.vertices.size(),
+        collapsed_triangle_count);
     }
   }
 
@@ -10410,6 +10532,17 @@ void inspect_auto_cfd_surface_boundary_topology_impl(
         diagnostics,
         testing::AutoCfdSurfaceFinalScreenFailureKind::boundary_topology_mismatch
       );
+      SQMESH_LOG_WARN(
+        "Boundary topology mismatch on {}: expected {} component(s) "
+        "(outer={}, inner={}, unknown={}, seam={}, degenerate={}), "
+        "but no boundary edges were emitted in the final mesh.",
+        topology_entity_debug_label(face_preprocess.face),
+        expected_components,
+        face_preprocess.boundary.outer_loop_count,
+        face_preprocess.boundary.inner_loop_count,
+        face_preprocess.boundary.unknown_loop_count,
+        face_preprocess.boundary.seam_loop_count,
+        face_preprocess.boundary.degenerate_loop_count);
       continue;
     }
 
@@ -10450,6 +10583,18 @@ void inspect_auto_cfd_surface_boundary_topology_impl(
         diagnostics,
         testing::AutoCfdSurfaceFinalScreenFailureKind::boundary_topology_mismatch
       );
+      SQMESH_LOG_WARN(
+        "Boundary topology mismatch on {}: expected {} component(s) "
+        "(outer={}, inner={}, unknown={}, seam={}, degenerate={}), "
+        "but the final mesh delivered {} boundary component(s).",
+        topology_entity_debug_label(face_preprocess.face),
+        expected_components,
+        face_preprocess.boundary.outer_loop_count,
+        face_preprocess.boundary.inner_loop_count,
+        face_preprocess.boundary.unknown_loop_count,
+        face_preprocess.boundary.seam_loop_count,
+        face_preprocess.boundary.degenerate_loop_count,
+        component_count);
     }
   }
 }
