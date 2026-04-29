@@ -75,26 +75,12 @@
 // test and point-in-sphere test implemented by Jonathan Shewchuk.            //
 // He generously provided the source code in the public domain,               //
 // http://www.cs.cmu.edu/~quake/robust.html.                                  //
-// predicates.cxx is a C++ version of the original C code.                    //
-//                                                                            //
-// The original predicates of Shewchuk only use "dynamic filters", i.e., it   //
-// computes the error at runtime step by step. the tet core first uses a "static    //
-// filter" in each predicate. It estimates the maximal possible error in all  //
-// cases.  It safely and quickly "filters" many easy cases.                   //
+// predicates.cxx is a C++ version of the original C code, now shared with    //
+// auto_cfd from src/core/. See src/core/predicates.hpp.                      //
 //                                                                            //
 //============================================================================//
 
-void exactinit(int, int, int, double, double, double);
-
-double orient3d(double *pa, double *pb, double *pc, double *pd);
-double insphere(double *pa, double *pb, double *pc, double *pd, double *pe);
-double orient4d(double *pa, double *pb, double *pc, double *pd, double *pe,
-              double ah, double bh, double ch, double dh, double eh);
-
-double orient2dexact(double *pa, double *pb, double *pc);
-double orient3dexact(double *pa, double *pb, double *pc, double *pd);
-double orient4dexact(double* pa, double* pb, double* pc, double* pd, double* pe,
-                   double ah, double bh, double ch, double dh, double eh);
+#include "../../../core/predicates.hpp"
 
 
 namespace sqmesh::mesh::tet::detail {

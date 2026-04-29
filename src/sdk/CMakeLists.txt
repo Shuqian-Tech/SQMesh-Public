@@ -13,13 +13,15 @@ add_library(
     ../mesh/sizing/mesh_size_controls.cpp
     ../mesh/sizing/proxy_mesh_geometry.cpp
     ../mesh/sizing/size_function.cpp
+    # core/predicates — Shewchuk's public-domain robust geometric predicates,
+    # shared by the tet mesher and auto_cfd's CDT Delaunay path.
+    ../core/predicates.cxx
     # mesh/auto_cfd
     ../mesh/auto_cfd/auto_cfd_surface_mesher.cpp
     ../mesh/auto_cfd/auto_cfd_surface_pipeline.cpp
     ../mesh/auto_cfd/auto_cfd_surface_proximity_index.cpp
     # mesh/tet/core (tet mesher engine, split from a single monolith along
     # its `//== <topic>_cxx ==//` banners; behavior unchanged)
-    ../mesh/tet/core/predicates.cxx
     ../mesh/tet/core/mempool.cxx
     ../mesh/tet/core/geom.cxx
     ../mesh/tet/core/flip.cxx

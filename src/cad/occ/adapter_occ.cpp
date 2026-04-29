@@ -32,8 +32,13 @@
 #include <STEPControl_StepModelType.hxx>
 #include <STEPControl_Writer.hxx>
 #include <GProp_GProps.hxx>
+#include <ShapeBuild_ReShape.hxx>
 #include <ShapeExtend_Status.hxx>
+#include <ShapeFix_Face.hxx>
+#include <ShapeFix_FixSmallFace.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeFix_Wire.hxx>
+#include <ShapeFix_Wireframe.hxx>
 #include <Standard_Failure.hxx>
 #include <Standard_Version.hxx>
 #include <Poly_PolygonOnTriangulation.hxx>
@@ -2602,6 +2607,142 @@ std::mutex &step_export_mutex() noexcept
 {
   geo::TopoReport report;
   report.before = inspect_topology(repaired_shape);
+
+  // ShapeFix_Shape's Free*Mode flags only touch wires/faces that are not
+  // attached to higher-level shapes, so face-bound wires with micro-edges
+  // pass through untouched. CRM's symmetry plane and nose hit exactly that
+  // case and stalled the surface mesher's 1D boundary recovery. Run the
+  // explicit per-face / per-wire / wireframe healing passes documented by
+  // OCCT (ShapeFix_Face / ShapeFix_Wire / ShapeFix_Wireframe /
+  // ShapeFix_FixSmallFace), driving each via ShapeBuild_ReShape so the
+  // edits propagate up to the parent compound.
+  const auto remove_degenerated_edges = [&]() {
+    ShapeBuild_ReShape rebuild;
+    bool any_removed = false;
+    for(TopExp_Explorer exp(repaired_shape, TopAbs_EDGE); exp.More(); exp.Next()) {
+      const TopoDS_Edge edge = TopoDS::Edge(exp.Current());
+      if(BRep_Tool::Degenerated(edge)) {
+        rebuild.Remove(edge);
+        any_removed = true;
+      }
+    }
+    if(any_removed) {
+      const TopoDS_Shape rebuilt = rebuild.Apply(repaired_shape);
+      if(!rebuilt.IsNull()) {
+        repaired_shape = rebuilt;
+      }
+    }
+  };
+
+  if(options.fix_degenerated) {
+    remove_degenerated_edges();
+
+    ShapeBuild_ReShape rebuild;
+    bool any_replaced = false;
+    for(TopExp_Explorer exp(repaired_shape, TopAbs_FACE); exp.More(); exp.Next()) {
+      TopoDS_Face face = TopoDS::Face(exp.Current());
+      ShapeFix_Face sff(face);
+      sff.FixAddNaturalBoundMode() = Standard_True;
+      sff.FixSmallAreaWireMode() = Standard_True;
+      static_cast<void>(sff.Perform());
+      if(sff.Status(ShapeExtend_DONE1) || sff.Status(ShapeExtend_DONE2) ||
+         sff.Status(ShapeExtend_DONE3) || sff.Status(ShapeExtend_DONE4) ||
+         sff.Status(ShapeExtend_DONE5)) {
+        rebuild.Replace(face, sff.Face());
+        any_replaced = true;
+      }
+    }
+    if(any_replaced) {
+      const TopoDS_Shape rebuilt = rebuild.Apply(repaired_shape);
+      if(!rebuilt.IsNull()) {
+        repaired_shape = rebuilt;
+      }
+    }
+    remove_degenerated_edges();
+  }
+
+  if(options.fix_small_edges) {
+    {
+      ShapeBuild_ReShape rebuild;
+      bool any_replaced = false;
+      for(TopExp_Explorer face_exp(repaired_shape, TopAbs_FACE); face_exp.More(); face_exp.Next()) {
+        TopoDS_Face face = TopoDS::Face(face_exp.Current());
+        for(TopExp_Explorer wire_exp(face, TopAbs_WIRE); wire_exp.More(); wire_exp.Next()) {
+          TopoDS_Wire oldwire = TopoDS::Wire(wire_exp.Current());
+          ShapeFix_Wire sfw(oldwire, face, options.tolerance);
+          sfw.ModifyTopologyMode() = Standard_True;
+          sfw.ClosedWireMode() = Standard_True;
+          bool replace = false;
+          replace = sfw.FixReorder() || replace;
+          replace = sfw.FixConnected() || replace;
+          if(sfw.FixSmall(Standard_False, options.tolerance) &&
+             !(sfw.StatusSmall(ShapeExtend_FAIL1) ||
+               sfw.StatusSmall(ShapeExtend_FAIL2) ||
+               sfw.StatusSmall(ShapeExtend_FAIL3))) {
+            replace = true;
+          }
+          replace = sfw.FixEdgeCurves() || replace;
+          replace = sfw.FixDegenerated() || replace;
+          replace = sfw.FixSelfIntersection() || replace;
+          replace = sfw.FixLacking(Standard_True) || replace;
+          if(replace) {
+            rebuild.Replace(oldwire, sfw.Wire());
+            any_replaced = true;
+          }
+        }
+      }
+      if(any_replaced) {
+        const TopoDS_Shape rebuilt = rebuild.Apply(repaired_shape);
+        if(!rebuilt.IsNull()) {
+          repaired_shape = rebuilt;
+        }
+      }
+    }
+
+    {
+      ShapeBuild_ReShape rebuild;
+      bool any_removed = false;
+      for(TopExp_Explorer exp(repaired_shape, TopAbs_EDGE); exp.More(); exp.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(exp.Current());
+        GProp_GProps system;
+        BRepGProp::LinearProperties(edge, system);
+        if(system.Mass() < options.tolerance) {
+          rebuild.Remove(edge);
+          any_removed = true;
+        }
+      }
+      if(any_removed) {
+        const TopoDS_Shape rebuilt = rebuild.Apply(repaired_shape);
+        if(!rebuilt.IsNull()) {
+          repaired_shape = rebuilt;
+        }
+      }
+    }
+
+    remove_degenerated_edges();
+
+    ShapeFix_Wireframe sfwf;
+    sfwf.SetPrecision(options.tolerance);
+    sfwf.Load(repaired_shape);
+    sfwf.ModeDropSmallEdges() = Standard_True;
+    static_cast<void>(sfwf.FixWireGaps());
+    static_cast<void>(sfwf.FixSmallEdges());
+    const TopoDS_Shape fixed = sfwf.Shape();
+    if(!fixed.IsNull()) {
+      repaired_shape = fixed;
+    }
+  }
+
+  if(options.fix_small_faces) {
+    ShapeFix_FixSmallFace sffsm;
+    sffsm.Init(repaired_shape);
+    sffsm.SetPrecision(options.tolerance);
+    sffsm.Perform();
+    const TopoDS_Shape fixed = sffsm.FixShape();
+    if(!fixed.IsNull()) {
+      repaired_shape = fixed;
+    }
+  }
 
   if(options.sew_faces) {
     BRepBuilderAPI_Sewing sewing(
