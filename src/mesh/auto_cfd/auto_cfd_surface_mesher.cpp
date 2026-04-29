@@ -10147,6 +10147,23 @@ void inspect_auto_cfd_surface_quality_gate_impl(
   std::unordered_map<MeshEdgeKey, std::size_t, MeshEdgeKeyHash> edge_face_counts;
   std::unordered_set<MeshFaceKey, MeshFaceKeyHash> unique_faces;
 
+  // Per-OCC-face accumulator for delivered-quality-gate rejections, so we can
+  // pinpoint which input faces produced sliver triangles (e.g. CRM at
+  // min_length=10 leaves a handful of degenerate triangles on a couple of
+  // faces, and the global rejection counter alone hides which ones).
+  struct SliverBucket final {
+    geo::TopologyEntityId owner {};
+    std::size_t count = 0U;
+    double worst_min_angle = std::numeric_limits<double>::infinity();
+    double worst_max_angle = -std::numeric_limits<double>::infinity();
+    double worst_aspect_ratio = -std::numeric_limits<double>::infinity();
+    double worst_radius_ratio = std::numeric_limits<double>::infinity();
+    double worst_skewness = -std::numeric_limits<double>::infinity();
+  };
+  std::unordered_map<std::uint64_t, SliverBucket> sliver_buckets;
+  constexpr std::uint64_t kInvalidSliverOwnerKey =
+    std::numeric_limits<std::uint64_t>::max();
+
   for(const auto &entity_group : domain.entity_groups()) {
     if(entity_group.order() != EntityOrder::face ||
        entity_group.role() != EntityGroupRole::computational) {
@@ -10222,6 +10239,37 @@ void inspect_auto_cfd_surface_quality_gate_impl(
           diagnostics,
           testing::AutoCfdSurfaceFinalScreenFailureKind::quality_gate_rejection
         );
+
+        const auto owner = domain.face_topology_owner(face_ref);
+        const auto bucket_key = geo::is_valid(owner)
+          ? pack_topology_entity_id(owner)
+          : kInvalidSliverOwnerKey;
+        auto [it, inserted] =
+          sliver_buckets.emplace(bucket_key, SliverBucket {});
+        if(inserted) {
+          it->second.owner = owner;
+        }
+        ++it->second.count;
+        if(std::isfinite(quality.min_angle)) {
+          it->second.worst_min_angle =
+            std::min(it->second.worst_min_angle, quality.min_angle);
+        }
+        if(std::isfinite(quality.max_angle)) {
+          it->second.worst_max_angle =
+            std::max(it->second.worst_max_angle, quality.max_angle);
+        }
+        if(std::isfinite(quality.aspect_ratio)) {
+          it->second.worst_aspect_ratio =
+            std::max(it->second.worst_aspect_ratio, quality.aspect_ratio);
+        }
+        if(std::isfinite(quality.radius_ratio)) {
+          it->second.worst_radius_ratio =
+            std::min(it->second.worst_radius_ratio, quality.radius_ratio);
+        }
+        if(std::isfinite(quality.skewness)) {
+          it->second.worst_skewness =
+            std::max(it->second.worst_skewness, quality.skewness);
+        }
       }
     }
   }
@@ -10231,6 +10279,44 @@ void inspect_auto_cfd_surface_quality_gate_impl(
       diagnostics,
       testing::AutoCfdSurfaceFinalScreenFailureKind::no_surface_triangles
     );
+  }
+
+  if(!sliver_buckets.empty()) {
+    std::vector<SliverBucket> ordered;
+    ordered.reserve(sliver_buckets.size());
+    for(const auto &kv : sliver_buckets) {
+      ordered.push_back(kv.second);
+    }
+    std::sort(
+      ordered.begin(),
+      ordered.end(),
+      [](const SliverBucket &lhs, const SliverBucket &rhs) noexcept {
+        if(lhs.count != rhs.count) {
+          return lhs.count > rhs.count;
+        }
+        const auto lhs_key = geo::is_valid(lhs.owner)
+          ? pack_topology_entity_id(lhs.owner)
+          : kInvalidSliverOwnerKey;
+        const auto rhs_key = geo::is_valid(rhs.owner)
+          ? pack_topology_entity_id(rhs.owner)
+          : kInvalidSliverOwnerKey;
+        return lhs_key < rhs_key;
+      }
+    );
+
+    for(const auto &bucket : ordered) {
+      SQMESH_LOG_WARN(
+        "Quality-gate rejections on {}: {} triangle(s) — "
+        "worst min_angle={:.4f}°, max_angle={:.4f}°, "
+        "aspect={:.2f}, radius_ratio={:.4f}, skewness={:.4f}",
+        topology_entity_debug_label(bucket.owner),
+        bucket.count,
+        std::isfinite(bucket.worst_min_angle) ? bucket.worst_min_angle : 0.0,
+        std::isfinite(bucket.worst_max_angle) ? bucket.worst_max_angle : 0.0,
+        std::isfinite(bucket.worst_aspect_ratio) ? bucket.worst_aspect_ratio : 0.0,
+        std::isfinite(bucket.worst_radius_ratio) ? bucket.worst_radius_ratio : 0.0,
+        std::isfinite(bucket.worst_skewness) ? bucket.worst_skewness : 0.0);
+    }
   }
 }
 
