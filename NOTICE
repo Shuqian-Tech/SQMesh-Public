@@ -18,11 +18,13 @@ TetGen 1.6 (Hang Si, Weierstrass Institute for Applied Analysis and
 Stochastics, Berlin, Germany)
 --------------------------------------------------------------------------------
 
-The tetrahedral meshing core located under src/mesh/tet/core/ (all files in
-that directory except predicates.cxx) is a derivative work of TetGen 1.6.
-TetGen 1.6 is distributed under the GNU Affero General Public License v3.0.
-SQMesh therefore carries forward the AGPL-3.0 license terms for the project
-as a whole.
+The tetrahedral meshing core located under src/mesh/tet/core/ is a
+derivative work of TetGen 1.6.  TetGen 1.6 is distributed under the GNU
+Affero General Public License v3.0.  SQMesh therefore carries forward the
+AGPL-3.0 license terms for the project as a whole.  Shewchuk's robust
+geometric predicates have been promoted from this directory to
+src/core/predicates.cxx and are shared with the auto-CFD surface mesher;
+their public-domain status is unaffected (see the next section).
 
 Reference: https://wias-berlin.de/software/tetgen/
 
@@ -31,10 +33,12 @@ Shewchuk's Robust Geometric Predicates (Jonathan Richard Shewchuk,
 Carnegie Mellon University)
 --------------------------------------------------------------------------------
 
-The file src/mesh/tet/core/predicates.cxx is Jonathan Richard Shewchuk's
+The file src/core/predicates.cxx is Jonathan Richard Shewchuk's
 public-domain implementation of arbitrary-precision floating-point
 arithmetic and robust geometric predicates.  It is included verbatim and
-is not covered by the AGPL-3.0 license of the surrounding project.
+is not covered by the AGPL-3.0 license of the surrounding project.  It is
+shared between the tetrahedral mesher (src/mesh/tet/core/) and the
+auto-CFD surface mesher (src/mesh/auto_cfd/) via src/core/predicates.hpp.
 
 Reference: https://www.cs.cmu.edu/~quake/robust.html
 

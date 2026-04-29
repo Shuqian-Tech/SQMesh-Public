@@ -11,7 +11,7 @@ A high-level acknowledgements section is also maintained in `NOTICE`.
 ## 1. TetGen 1.6
 
 - **Component**: Tetrahedral meshing core (derivative work)
-- **Location in SQMesh**: `src/mesh/tet/core/` (all files except `predicates.cxx`)
+- **Location in SQMesh**: `src/mesh/tet/core/` (entire directory; Shewchuk's predicates have been promoted to `src/core/predicates.cxx` and are shared with auto_cfd)
 - **Upstream author**: Hang Si, Weierstrass Institute for Applied Analysis and Stochastics (WIAS), Berlin
 - **Upstream homepage**: https://wias-berlin.de/software/tetgen/
 - **License**: GNU Affero General Public License v3.0
@@ -29,15 +29,17 @@ and make corresponding source code available.
 
 ## 2. Shewchuk's Robust Geometric Predicates
 
-- **Component**: Exact geometric predicates (`orient2d`, `orient3d`, `insphere`, etc.)
-- **Location in SQMesh**: `src/mesh/tet/core/predicates.cxx`
+- **Component**: Exact geometric predicates (`orient2d`, `orient3d`, `incircle`, `insphere`, etc.)
+- **Location in SQMesh**: `src/core/predicates.cxx` (declared in `src/core/predicates.hpp`)
 - **Upstream author**: Jonathan Richard Shewchuk, Carnegie Mellon University
 - **Upstream homepage**: https://www.cs.cmu.edu/~quake/robust.html
 - **License**: Public domain
 
 This file is included in SQMesh verbatim and carries no copyright encumbrance
 of its own.  The surrounding SQMesh project is AGPL-3.0, but this file alone
-may be used without any restriction.
+may be used without any restriction.  It is shared between the tetrahedral
+mesher (`src/mesh/tet/core/`) and the auto-CFD surface mesher
+(`src/mesh/auto_cfd/`).
 
 ## 3. Gmsh 4.x
 
