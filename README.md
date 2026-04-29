@@ -1,7 +1,8 @@
 # SQMesh
 
-**SQMesh** is an open-source meshing toolkit for CFD and FEA workflows,
-maintained by Suzhou AI Lab and Shuqian Tech.
+**SQMesh** is an open-source CAD-to-CFD/FEA meshing toolkit — STEP/IGES
+import, surface and volume meshing, boundary layers, and Python/C++
+integration in one SDK. Maintained by Suzhou AI Lab and Shuqian Tech.
 
 ## Features
 
